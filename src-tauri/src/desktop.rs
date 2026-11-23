@@ -568,9 +568,29 @@ enum ShortcutAction {
 #[derive(Default)]
 struct NotepadPool {
     available: Mutex<Vec<String>>,
+    // 快捷便签全局单例：当前占用的窗口 label（可见或刚关闭待清理）
+    visible: Mutex<Option<String>>,
 }
 
 impl NotepadPool {
+    fn set_visible(&self, label: &str) {
+        if let Ok(mut guard) = self.visible.lock() {
+            *guard = Some(label.to_string());
+        }
+    }
+
+    fn get_visible(&self) -> Option<String> {
+        self.visible.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    fn clear_visible(&self, label: &str) {
+        if let Ok(mut guard) = self.visible.lock() {
+            if guard.as_deref() == Some(label) {
+                *guard = None;
+            }
+        }
+    }
+
     fn take(&self) -> Option<String> {
         self.available.lock().ok()?.pop()
     }
@@ -1160,6 +1180,11 @@ pub fn setup_desktop(app: &mut App) -> Result<(), Box<dyn Error>> {
 
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     if matches!(event, WindowEvent::Destroyed) {
+        if window.label().starts_with("notepad-") {
+            if let Some(pool) = window.app_handle().try_state::<NotepadPool>() {
+                pool.clear_visible(window.label());
+            }
+        }
         if let Some(note_id) = window.label().strip_prefix("tile-") {
             let _ = window
                 .app_handle()
@@ -1431,8 +1456,27 @@ fn open_notepad_window_now(
     bounds: Option<WindowBounds>,
 ) -> Result<String, AppError> {
     if note_id.is_none() {
+        // 已有可见快捷便签：不新建窗口，把它带到当前桌面并聚焦
+        if let Some(pool) = app.try_state::<NotepadPool>() {
+            if let Some(label) = pool.get_visible() {
+                if let Some(window) = app.get_webview_window(&label) {
+                    set_window_follows_active_space(&window);
+                    let locale = configured_locale();
+                    let _ = window.set_title(locales::notepad_window_title(locale));
+                    let _ = apply_window_bounds(&window, bounds);
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = window.emit("notepad:activate", label.clone());
+                    return Ok(label);
+                }
+                pool.clear_visible(&label);
+            }
+        }
         if let Some(reused) = activate_pooled_notepad(app, bounds) {
             clear_hidden_window_state(app);
+            if let Some(pool) = app.try_state::<NotepadPool>() {
+                pool.set_visible(&reused);
+            }
             return Ok(reused);
         }
     }
@@ -1445,7 +1489,7 @@ fn open_notepad_window_now(
         None => "index.html?view=notepad".to_string(),
     };
 
-    open_or_focus_window(
+    let opened_label = open_or_focus_window(
         app,
         &label,
         WindowOpenOptions {
@@ -1458,7 +1502,13 @@ fn open_notepad_window_now(
             skip_taskbar: true,
             bounds,
         },
-    )
+    )?;
+    if note_id.is_none() {
+        if let Some(pool) = app.try_state::<NotepadPool>() {
+            pool.set_visible(&opened_label);
+        }
+    }
+    Ok(opened_label)
 }
 
 /// 调整池中隐藏 notepad 窗口的 WebView2 内存占用档位（仅 Windows）。
@@ -1494,6 +1544,37 @@ fn set_webview_memory_usage_level(window: &tauri::WebviewWindow, low: bool) {
 #[cfg(not(target_os = "windows"))]
 fn set_webview_memory_usage_level(_window: &tauri::WebviewWindow, _low: bool) {}
 
+/// 让 notepad 窗口跟随当前桌面：呼出时窗口移动到激活的 Space，
+/// 而不是把用户切回窗口原来所在的 Space（MoveToActiveSpace）。
+/// CanJoinAllSpaces 与其互斥，需一并清除；其余已有位保持不动。
+#[cfg(target_os = "macos")]
+fn set_window_follows_active_space(window: &tauri::WebviewWindow) {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    let handle = window.app_handle().clone();
+    let label = window.label().to_string();
+    let _ = handle.clone().run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(&label) else {
+            return;
+        };
+        let Ok(ns_window_ptr) = window.ns_window() else {
+            return;
+        };
+        // SAFETY: 回调运行于主线程；指针是窗口自身持有的 NSWindow，
+        // 闭包执行期间窗口对象保持存活。
+        unsafe {
+            let ns_window: &NSWindow = &*(ns_window_ptr as *mut NSWindow);
+            let mut behavior = ns_window.collectionBehavior();
+            behavior &= !NSWindowCollectionBehavior::CanJoinAllSpaces;
+            behavior |= NSWindowCollectionBehavior::MoveToActiveSpace;
+            ns_window.setCollectionBehavior(behavior);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_follows_active_space(_window: &tauri::WebviewWindow) {}
+
 fn activate_pooled_notepad(app: &AppHandle, bounds: Option<WindowBounds>) -> Option<String> {
     let pool = app.try_state::<NotepadPool>()?;
     let label = pool.take()?;
@@ -1515,6 +1596,10 @@ fn activate_pooled_notepad(app: &AppHandle, bounds: Option<WindowBounds>) -> Opt
 }
 
 pub fn recycle_notepad_window(app: &AppHandle, label: &str) -> Result<(), AppError> {
+    if let Some(pool) = app.try_state::<NotepadPool>() {
+        pool.clear_visible(label);
+    }
+
     let Some(window) = app.get_webview_window(label) else {
         return Ok(());
     };
@@ -1625,6 +1710,7 @@ fn prewarm_notepad(app: &AppHandle) -> Result<(), AppError> {
 
     // 预热窗口在池中等待期间保持低内存档位，激活时恢复 Normal
     set_webview_memory_usage_level(&window, true);
+    set_window_follows_active_space(&window);
 
     pool.put(label);
 
@@ -1820,6 +1906,9 @@ fn open_or_focus_window(
     let visual_options = dynamic_window_visual_options(label);
 
     if let Some(window) = app.get_webview_window(label) {
+        if label.starts_with("notepad-") {
+            set_window_follows_active_space(&window);
+        }
         window.set_title(&opts.title)?;
         apply_window_bounds(&window, opts.bounds)?;
         window.set_shadow(opts.shadow)?;
@@ -1856,6 +1945,10 @@ fn open_or_focus_window(
     };
 
     let window = builder.build()?;
+
+    if label.starts_with("notepad-") {
+        set_window_follows_active_space(&window);
+    }
 
     apply_window_bounds(&window, opts.bounds)?;
 

@@ -755,3 +755,10 @@ input::placeholder {
 :root[data-theme="dark"] .markdown-alert-caution .markdown-alert-title {
   color: #e87462;
 }
+
+/* Quick notepad: hide the horizontal scrollbar but keep horizontal scrolling
+   (trackpad pan / wheel, caret auto-scroll into view). Vertical bar untouched. */
+.notepad-textarea-no-hbar::-webkit-scrollbar:horizontal {
+  height: 0;
+  display: none;
+}

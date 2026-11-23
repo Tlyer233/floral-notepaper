@@ -207,7 +207,7 @@ export function NotePad({
 
     async function bootstrap() {
       try {
-        const [loadedConfig] = await Promise.all([getConfig(), refreshNotes()]);
+        const [loadedConfig, loadedNotes] = await Promise.all([getConfig(), refreshNotes()]);
         if (!cancelled) {
           setNoteSurfaceAutoSave(loadedConfig.noteSurfaceAutoSave);
           setSurfaceFontSize(loadedConfig.surfaceFontSize ?? 14);
@@ -222,6 +222,12 @@ export function NotePad({
         }
         if (initialNoteId) {
           const note = await getNote(initialNoteId);
+          if (!cancelled) applyNote(note);
+        } else if (loadedNotes.length > 0) {
+          const mostRecent = [...loadedNotes].sort((a, b) =>
+            b.updatedAt.localeCompare(a.updatedAt),
+          )[0];
+          const note = await getNote(mostRecent.id);
           if (!cancelled) applyNote(note);
         }
       } catch (error) {
@@ -326,7 +332,14 @@ export function NotePad({
       setStatus("empty");
       setIsExiting(false);
       setSurfaceMode("pad");
-      void refreshNotes().catch(() => undefined);
+      void refreshNotes()
+        .then(async (loaded) => {
+          if (loaded.length === 0) return;
+          const mostRecent = [...loaded].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+          const note = await getNote(mostRecent.id);
+          applyNote(note);
+        })
+        .catch(() => undefined);
       void showCurrentWindow()
         .then(() => contentRef.current?.focus())
         .catch(() => undefined);
@@ -805,6 +818,25 @@ export function NotePad({
               </div>
 
               <div className="ml-auto flex items-center gap-1.5">
+                {mode === "new" && (
+                  <>
+                    <span className="text-[11px] text-ink-ghost font-mono tabular-nums truncate max-w-[120px]">
+                      {`${countNoteChars(content)} ${t("common.wordCountUnit", { defaultValue: "字" })} · ${statusLabel[status]}`}
+                    </span>
+                    <button
+                      onClick={resetDraft}
+                      className="px-3 py-1 text-[12px] text-ink-faint hover:text-ink-soft rounded-lg hover:bg-paper-warm transition-all duration-200 cursor-pointer"
+                    >
+                      {t("notepad.button.clear", { defaultValue: "清空" })}
+                    </button>
+                    <button
+                      onClick={() => void handleSave()}
+                      className="px-3 py-1 text-[12px] text-cloud bg-bamboo hover:bg-bamboo-light rounded-lg transition-all duration-200 font-medium cursor-pointer"
+                    >
+                      {t("common.save", { defaultValue: "保存" })}
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={() => void handlePin()}
                   className="group w-7 h-7 flex items-center justify-center rounded-lg transition-all duration-200 cursor-pointer text-ink-ghost hover:text-ink-faint hover:bg-paper-warm"
@@ -845,8 +877,6 @@ export function NotePad({
               </div>
             </div>
 
-            <div className="mx-4 mt-1 h-px bg-paper-deep/50" />
-
             {mode === "new" ? (
               <div
                 data-pad-editor-body="true"
@@ -874,6 +904,7 @@ export function NotePad({
                 <textarea
                   ref={contentRef}
                   data-tab-indent="true"
+                  wrap="off"
                   value={content}
                   onChange={(event) => {
                     setContent(event.target.value);
@@ -895,29 +926,9 @@ export function NotePad({
                     }
                   }}
                   placeholder={t("notepad.placeholder.content", { defaultValue: "写点什么……" })}
-                  className="w-full flex-1 min-h-0 pb-2 leading-relaxed text-ink-soft font-body placeholder:text-ink-ghost/50"
+                  className="w-full flex-1 min-h-0 pb-2 leading-relaxed text-ink-soft font-body placeholder:text-ink-ghost/50 whitespace-pre overflow-x-auto notepad-textarea-no-hbar"
                   style={{ fontSize: `${surfaceFontSize}px`, tabSize: `var(--tab-indent-size, 2)` }}
                 />
-
-                <div className="flex items-center justify-between mt-auto pt-2 border-t border-paper-deep/30 shrink-0">
-                  <span className="text-[11px] text-ink-ghost font-mono tabular-nums truncate max-w-[170px]">
-                    {`${countNoteChars(content)} ${t("common.wordCountUnit", { defaultValue: "字" })} · ${statusLabel[status]}`}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={resetDraft}
-                      className="px-4 py-1.5 text-[12px] text-ink-faint hover:text-ink-soft rounded-lg hover:bg-paper-warm transition-all duration-200 cursor-pointer"
-                    >
-                      {t("notepad.button.clear", { defaultValue: "清空" })}
-                    </button>
-                    <button
-                      onClick={() => void handleSave()}
-                      className="px-4 py-1.5 text-[12px] text-cloud bg-bamboo hover:bg-bamboo-light rounded-lg transition-all duration-200 font-medium cursor-pointer"
-                    >
-                      {t("common.save", { defaultValue: "保存" })}
-                    </button>
-                  </div>
-                </div>
               </div>
             ) : (
               <NotepadOpenPanel
